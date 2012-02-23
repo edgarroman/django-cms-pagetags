@@ -8,7 +8,7 @@ from cms.models import Page
 from tagging.models import TaggedItem
 from tagging.utils import parse_tag_input
 from pagetags.models import PageTagging
-
+import shlex
 
 register = template.Library()
 
@@ -45,6 +45,34 @@ class DynamicTags(list):
 
     def bind(self, context):
         self[:] = parse_tag_input(context.get(self.varname, ''))
+
+class TagsOfTaggedPagesNode(template.Node):
+    def __init__(self, parsed_tags, var_name):
+        self.parsed_tags = parsed_tags
+        self.var_name = var_name
+
+    def render(self, context):
+        self.parsed_tags.bind(context)
+        pagetaggings_from_site = PageTagging.objects.filter(
+            page__site=settings.SITE_ID
+        ).select_related()
+
+        page_taggings = TaggedItem.objects.get_by_model(
+            pagetaggings_from_site, self.parsed_tags
+        )
+
+        # now loop through the pages found and extract the tags
+        final_tag_list = []
+        for page_tagging in page_taggings:
+            # We'll have to ensure that we only have one instance of
+            # each tag
+            page_tag_list = shlex.split(page_tagging.page_tags)
+            for tag in page_tag_list:
+                final_tag_list.append(tag)
+
+        # We use a set here to remove duplicate tags
+        context[self.var_name] =  set(final_tag_list)
+        return ''
 
 
 class TaggedPagesNode(template.Node):
@@ -130,6 +158,35 @@ def parse_slug(quoted_or_var):
     and quoted_or_var[0] in ('"', "'")):
         return StaticSlug(quoted_or_var[1:-1])
     return DynamicSlug(varname=quoted_or_var)
+
+@register.tag
+def tags_of_pages_with_tags(parser, token):
+    '''
+    This tag returns a list of tags
+    the tags returns are the union of all tags for any page with
+    the requested tag.  So if a page is tagged with:
+      blog, art, motorcycle
+    then a call to tags_of_pages_with_tags 'blog' will return:
+      blog, art, motorcycle
+    '''
+    parsed_tags, var_name = _parse_tags_of_pages_with_tags(token)
+    return TagsOfTaggedPagesNode(parsed_tags, var_name)
+
+def _parse_tags_of_pages_with_tags(token):
+    tag_name, arg = _extract_tag_content(token)
+
+    m = re.search(r"""
+        (.*?)                                   # taglist or varname
+
+        \s+ as \s+ (\w+) \s*                    # collector variable
+    """, arg, flags=re.VERBOSE)
+    if not m:
+        raise template.TemplateSyntaxError(
+            "%r tag had invalid arguments" % tag_name
+        )
+    tags, var_name = m.groups()
+
+    return parsed_tags(tags), var_name
 
 
 @register.tag
